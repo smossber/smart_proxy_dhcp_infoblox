@@ -18,7 +18,8 @@ module Proxy::DHCP::Infoblox
       @range = Proxy::DHCP::Infoblox::Plugin.settings.range
       wapi_version = Proxy::DHCP::Infoblox::Plugin.settings.wapi_version
       ::Infoblox.wapi_version = "#{wapi_version}"
-      @connection = ::Infoblox::Connection.new(username: infoblox_user, password: infoblox_pw, host: server)
+	# Adding ssl_opts 
+      @connection = ::Infoblox::Connection.new(username: infoblox_user, password: infoblox_pw, host: server, ssl_opts: {verify: false})
       logger.debug "Loaded infoblox provider with #{@record_type} record_type and #{wapi_version} wapi_version"
     end
 
@@ -111,19 +112,23 @@ module Proxy::DHCP::Infoblox
       net.to_range.each do |ip|
         all_addresses.push(ip.to_s)
       end
-      range_start=IPAddr.new(from_ip_address)
-      range_stop=IPAddr.new(to_ip_address)
-      included_addresses=Array.new
-      (range_start..range_stop).each do |ip|
-        included_addresses.push(ip.to_s)
-      end
-      excluded_addresses=all_addresses-included_addresses
+	# Commenting section out as the DHCP IPAM call is not sending any from_ip_address or to_ip_address
+	# Messing up the ::Infoblox::Network.find().first.next_available_ip
+	# Functioning well without excluded address
+      #range_start=IPAddr.new(from_ip_address)
+      #range_stop=IPAddr.new(to_ip_address)
+      #included_addresses=Array.new
+      #(range_start..range_stop).each do |ip|
+        #included_addresses.push(ip.to_s)
+      #end
+      #excluded_addresses=all_addresses-included_addresses
       #excluded_addresses is now an array of ips containing all the ips from the network not between from, and to_ip_address
 
       if @range
         ::Infoblox::Range.find(@connection, network: "#{network_address.network}/#{network_address.cidr}").first.next_available_ip(1,excluded_addresses)
       else
-        ::Infoblox::Network.find(@connection, network: "#{network_address.network}/#{network_address.cidr}").first.next_available_ip(1,excluded_addresses)
+        #::Infoblox::Network.find(@connection, network: "#{network_address.network}/#{network_address.cidr}").first.next_available_ip(1,excluded_addresses)
+        ::Infoblox::Network.find(@connection, network: "#{network_address.network}/#{network_address.cidr}").first.next_available_ip(1)
       end
       # Idea for randomisation in case of concurrent installs:
       #::Infoblox::Network.find(@connection, network: "#{network_address.network}/#{network_address.cidr}").first.next_available_ip(15).sample
