@@ -18,7 +18,6 @@ module Proxy::DHCP::Infoblox
       @range = Proxy::DHCP::Infoblox::Plugin.settings.range
       wapi_version = Proxy::DHCP::Infoblox::Plugin.settings.wapi_version
       ::Infoblox.wapi_version = "#{wapi_version}"
-	# Adding ssl_opts 
       @connection = ::Infoblox::Connection.new(username: infoblox_user, password: infoblox_pw, host: server, ssl_opts: {verify: false})
       logger.debug "Loaded infoblox provider with #{@record_type} record_type and #{wapi_version} wapi_version"
     end
@@ -36,21 +35,24 @@ module Proxy::DHCP::Infoblox
 
     def load_subnets
       logger.debug 'load_subnets'
-      ::Infoblox::Network.all(@connection).each do |obj|
-        if match = obj.network.split('/')
-          tmp = IPAddr.new(obj.network)
-          netmask = IPAddr.new(tmp.instance_variable_get("@mask_addr"), Socket::AF_INET).to_s
-          next unless managed_subnet? "#{match[0]}/#{netmask}"
-          options = {}
-          service.add_subnets(Proxy::DHCP::Subnet.new(match[0], netmask, options))
-        end
-      end
+      # Intentionally do nothing
+      # This was a huge time consumer.
+      # Instead of reading all subnets and for each add in memory, the other methods has been rewritten to call the Infoblox API directly
     end
 
     def find_subnet(network_address)
-      # returns Proxy::DHCP::Subnet that has network_address or nil if none was found
-      # network = ::Infoblox::Ipv4address.find(connection, "ip_address" => network_address).first.network
-      super
+	logger.debug 'find_subnet in infoblox_dhcp_main'
+	logger.debug "network_address #{network_address}"
+	# https://ipam.illinois.edu/api/doc/Infoblox/DHCP/Network.html
+	network = ::Infoblox::Network.find(@connection, network: "#{network_address}").first
+        logger.debug network
+	logger.debug network.network
+        address = network.network.partition('/').first
+        cidr    = network.network.partition('/').last
+	netmask = IPAddr.new('255.255.255.255').mask(cidr).to_s
+        subnet  = Subnet.new(address, netmask)
+        logger.debug "infoblox find_subnet returns subnet #{subnet}"
+        return subnet 
     end
 
     def load_subnet_data(subnet)
@@ -101,34 +103,36 @@ module Proxy::DHCP::Infoblox
     def unused_ip(network_address, mac_address, from_ip_address, to_ip_address)
       # returns first available ip address in a subnet with network_address, for a host with mac_address, in the range of ip addresses: from_ip_address, to_ip_address
       # Deliberatly ignoring everything but first argument
+     
       logger.debug "Infoblox unused_ip Network_address: #{network_address} #{mac_address}, #{from_ip_address}, #{to_ip_address}"
       #next_available_ip can take a number to return (1), and an array of ips to exclude. So, we need to:
       #build a list of all ips in the network (all_addresses)
       #build a list of all ips in between from_ip_address and to_ip_address (include_addresses)
       #remove all of the from_ip_address and to_ip_address from the all_address (exclude_addresses)
       #and call next_available_ip with exclude_addresses passed
-      all_addresses = Array.new
-      net=IPAddr.new("#{network_address.network}/#{network_address.cidr}")
-      net.to_range.each do |ip|
-        all_addresses.push(ip.to_s)
-      end
-	# Commenting section out as the DHCP IPAM call is not sending any from_ip_address or to_ip_address
-	# Messing up the ::Infoblox::Network.find().first.next_available_ip
-	# Functioning well without excluded address
-      #range_start=IPAddr.new(from_ip_address)
-      #range_stop=IPAddr.new(to_ip_address)
-      #included_addresses=Array.new
-      #(range_start..range_stop).each do |ip|
-        #included_addresses.push(ip.to_s)
-      #end
-      #excluded_addresses=all_addresses-included_addresses
-      #excluded_addresses is now an array of ips containing all the ips from the network not between from, and to_ip_address
+      if @range 
+    	  logger.debug "Creating Array for all addresses"
+    	  all_addresses = Array.new
+    	  logger.debug "new=IPAddr.new using #{network_address.network}/#{network_address.cidr}"
+    	  net=IPAddr.new("#{network_address.network}/#{network_address.cidr}")
+    	  logger.info "passed net=IPAddr"
+    	  net.to_range.each do |ip|
+    	    all_addresses.push(ip.to_s)
+    	  end
+    	  logger.debug "running IPAddr.new(#{from_ip_address})"
 
-      if @range
-        ::Infoblox::Range.find(@connection, network: "#{network_address.network}/#{network_address.cidr}").first.next_available_ip(1,excluded_addresses)
+    	  range_start=IPAddr.new("#{from_ip_address}/#{network_address.cidr}")
+    	  range_stop=IPAddr.new("#{to_ip_address}/#{network_address.cidr}")
+    	  included_addresses=Array.new
+    	  (range_start..range_stop).each do |ip|
+    	          included_addresses.push(ip.to_s)
+    	  end
+    	  excluded_addresses=all_addresses-included_addresses
+    	  #excluded_addresses is now an array of ips containing all the ips from the network not between from, and to_ip_address
+
+    	    ::Infoblox::Range.find(@connection, network: "#{network_address.address}").first.next_available_ip(1,excluded_addresses)
       else
-        #::Infoblox::Network.find(@connection, network: "#{network_address.network}/#{network_address.cidr}").first.next_available_ip(1,excluded_addresses)
-        ::Infoblox::Network.find(@connection, network: "#{network_address.network}/#{network_address.cidr}").first.next_available_ip(1)
+        ::Infoblox::Network.find(@connection, network: "#{network_address.network}").first.next_available_ip(1)
       end
       # Idea for randomisation in case of concurrent installs:
       #::Infoblox::Network.find(@connection, network: "#{network_address.network}/#{network_address.cidr}").first.next_available_ip(15).sample
@@ -165,6 +169,7 @@ module Proxy::DHCP::Infoblox
       elsif @record_type == 'fixed_address'
         logger.debug "find_record for #{an_address}"
         fixed_address = ::Infoblox::Fixedaddress.find(@connection, 'ipv4addr' => ipv4address)
+	logger.debug "fixed_address: #{fixed_address}"
         #logger.debug "#{fixed_address.inspect}"
         return nil if fixed_address == []
         #return nil if fixed_address.emtpy? || fixed_address.first.name.empty?
@@ -175,8 +180,12 @@ module Proxy::DHCP::Infoblox
         opts[:ip] = fixed_address.first.ipv4addr
       end
       # Subnet should only be one, not checking that yet
-      subnet = subnets.find { |s| s.include? ipv4address }
+      #subnet = subnets.find { |s| s.include? ipv4address }
+
+	
+      subnet = find_subnet(subnet_address)
       Proxy::DHCP::Record.new(opts.merge(:subnet => subnet))
+      logger.debug 'Found record'
     end
 
     def create_infoblox_host_record(record)
